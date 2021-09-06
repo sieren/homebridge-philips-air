@@ -4,15 +4,17 @@
     "module": "commonjs",
     "sourceMap": true,
     "outDir": "dist",
-    "rootDir": "src",
+    "esModuleInterop": true,
+    "rootDir": "./src",
     "allowJs": true,
     "strict": true,
-    "esModuleInterop": true,
+    "noImplicitAny": false,
     "forceConsistentCasingInFileNames": true,
-    "removeComments": true
+    "removeComments": true,
+     "moduleResolution": "node"
   },
   "include": [
-    "./src/**/*",
+    "./src",
     "./sensor/**/*"
   ]
 }
