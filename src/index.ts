@@ -12,9 +12,10 @@ import {
 } from 'homebridge';
 import {AirClient, HttpClient, CoapClient, PlainCoapClient, HttpClientLegacy} from 'philips-air';
 import {promisify} from 'util';
-import {exec} from 'child_process';
+import {exec, ChildProcess} from 'child_process';
 import * as fs from 'fs';
 import timestamp from 'time-stamp';
+import process from 'process';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore
 import localStorage from 'node-sessionstorage';
@@ -26,13 +27,13 @@ let Accessory: typeof PlatformAccessory;
 
 const PLUGIN_NAME = 'homebridge-philips-air';
 const PLATFORM_NAME = 'philipsAir';
-const pathToModule = require.resolve(PLUGIN_NAME);
+const pathToModule = '/home/sierenmusic/HomeKit/homebridge-philips-air/';
+const { spawn } = require('child_process');
 const pathTopyaircontrol = pathToModule.replace('dist/index.js', 'node_modules/philips-air/pyaircontrol.py');
 const pathToSensorFiles = pathToModule.replace('dist/index.js', 'sensor/');
 
 enum CommandType {
-  Polling = 0,
-  GetFirmware,
+  GetFirmware = 0,
   GetFilters,
   GetStatus,
   SetData
@@ -57,7 +58,8 @@ type Purifier = {
   uil?: string,
   rh?: number,
   rhset?: number,
-  func?: string
+  func?: string,
+  pwr?: number
 };
 
 class PhilipsAirPlatform implements DynamicPlatformPlugin {
@@ -69,6 +71,8 @@ class PhilipsAirPlatform implements DynamicPlatformPlugin {
   private readonly purifiers: Map<string, Purifier> = new Map();
   private readonly commandQueue: Array<Command> = [];
   private queueRunning = false;
+  private children: Array<ChildProcess> = [];
+  private updateTimer?: NodeJS.Timeout
 
   enqueuePromise = promisify(this.enqueueCommand);
 
@@ -102,11 +106,21 @@ class PhilipsAirPlatform implements DynamicPlatformPlugin {
     });
     this.removeAccessories(badAccessories);
 
+    this.updateTimer = setInterval(function(this: PhilipsAirPlatform) {
+      this.children.forEach((child) => {
+        child.kill();
+      });
+    
+      this.purifiers.forEach((purifier) => {
+        this.updatePolling(purifier);
+      });
+
+    }, 60000 * 10);
     this.purifiers.forEach((purifier) => {
-      this.enqueueCommand(CommandType.Polling, purifier);
-      this.enqueueCommand(CommandType.GetFirmware, purifier);
-      this.enqueueCommand(CommandType.GetStatus, purifier);
-      this.enqueueCommand(CommandType.GetFilters, purifier);
+      this.updatePolling(purifier);
+      // this.enqueueCommand(CommandType.GetFirmware, purifier);
+      // this.enqueueCommand(CommandType.GetStatus, purifier);
+      // this.enqueueCommand(CommandType.GetFilters, purifier);
     });
   }
 
@@ -131,404 +145,153 @@ class PhilipsAirPlatform implements DynamicPlatformPlugin {
     }
   }
 
-  async updatePolling(purifier: Purifier): Promise<void> {
-    try {
-      // Polling interval
-      let polling = purifier.config.polling || 60;
-      if (polling < 60) {
-        polling = 60;
-      }
-      setInterval(function() {
-        exec('python3 ' + pathTopyaircontrol + ' --ipaddr ' + purifier.config.ip + ' --protocol ' + purifier.config.protocol + ' --status', (error, stdout, stderr) => {
-          if (error || stderr) {
-            console.log(timestamp('[DD.MM.YYYY, HH:mm:ss] ') + '\x1b[36m[Philips Air] \x1b[31m[' + purifier.config.name + '] Unable to get data for polling: Error: spawnSync python3 ETIMEDOUT.\x1b[0m');
-            console.log(timestamp('[DD.MM.YYYY, HH:mm:ss] ') + '\x1b[33mIf your have "Error: spawnSync python3 ETIMEDOUT" your need unplug the accessory from outlet for 10 seconds and plug again.\x1b[0m');
-          }
+  updatePolling(purifier: Purifier) {
+      var child = spawn('/usr/local/bin/aioairctrl', ['-H', purifier.config.ip, 'status-observe', '-J']);
+      child.on('exit', (code: any) => {
+        this.log.error(`Exit code is: ${code}`);
+      });
 
-          if (error || stderr || error && stderr) {
-            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-            // @ts-ignore
-            stdout = {om: localStorage.getItem('om'), pwr: localStorage.getItem('pwr'), cl: false, aqil: localStorage.getItem('aqil'), uil: localStorage.getItem('uil'), dt: 0, dtrs: 0, mode: localStorage.getItem('mode'), func: localStorage.getItem('func'), rhset: localStorage.getItem('rhset'), 'rh': localStorage.getItem('rh'), 'temp': localStorage.getItem('temp'), pm25: localStorage.getItem('pm25'), iaql: localStorage.getItem('iaql'), aqit: 4, ddp: '1', rddp: localStorage.getItem('rddp'), err: 0, wl: localStorage.getItem('wl'), fltt1: localStorage.getItem('fltt1'), fltt2: localStorage.getItem('fltt2'), fltsts0: localStorage.getItem('fltsts0'), fltsts1: localStorage.getItem('fltsts1'), fltsts2: localStorage.getItem('fltsts2'), wicksts: localStorage.getItem('wicksts')};
-            stdout = JSON.stringify(stdout);
-          }
-          const obj = JSON.parse(stdout);
-          if (!error || !stderr || !error && !stderr) {
-            localStorage.setItem('pwr', obj.pwr);
-            localStorage.setItem('om', obj.om);
-            localStorage.setItem('aqil', obj.aqil);
-            localStorage.setItem('uil', obj.uil);
-            localStorage.setItem('mode', obj.mode);
-            localStorage.setItem('func', obj.func);
-            localStorage.setItem('rhset', obj.rhset);
-            localStorage.setItem('iaql', obj.iaql);
-            localStorage.setItem('pm25', obj.pm25);
-            localStorage.setItem('rh', obj.rh);
-            localStorage.setItem('temp', obj.temp);
-            localStorage.setItem('rddp', obj.rddp);
-            localStorage.setItem('wl', obj.wl);
-            localStorage.setItem('fltt1', obj.fltt1);
-            localStorage.setItem('fltt2', obj.fltt2);
-            localStorage.setItem('fltsts0', obj.fltsts0);
-            localStorage.setItem('fltsts1', obj.fltsts1);
-            localStorage.setItem('fltsts2', obj.fltsts2);
-            localStorage.setItem('wicksts', obj.wicksts);
-          } else {
-            localStorage.setItem('pwr', 1);
-            localStorage.setItem('om', '0');
-            localStorage.setItem('aqil', '0');
-            localStorage.setItem('uil', 0);
-            localStorage.setItem('mode', 'A');
-            localStorage.setItem('func', 'PH');
-            localStorage.setItem('rhset', 50);
-            localStorage.setItem('iaql', 1);
-            localStorage.setItem('pm25', 1);
-            localStorage.setItem('rh', 45);
-            localStorage.setItem('temp', 25);
-            localStorage.setItem('rddp', 1);
-            localStorage.setItem('wl', 100);
-            localStorage.setItem('fltt1', 'A3');
-            localStorage.setItem('fltt2', 'C7');
-            localStorage.setItem('fltsts0', 287);
-            localStorage.setItem('fltsts1', 2553);
-            localStorage.setItem('fltsts2', 2553);
-            localStorage.setItem('wicksts', 4005);
-          }
+    //  child.stdout.setEncoding('utf8');
+    //  child.stdout.pipe(process.stdout);
+      child.stdout.on('data', (data: any) => {
+        this.log.error("Got some new stuff!");
+        const obj = JSON.parse(data.toString());
+        this.log.error(obj);
+        this.log.error("GOT DATA!!");
+        localStorage.setItem('pwr', obj.pwr);
+        localStorage.setItem('om', obj.om);
+        localStorage.setItem('aqil', obj.aqil);
+        localStorage.setItem('uil', obj.uil);
+        localStorage.setItem('mode', obj.mode);
+        localStorage.setItem('func', obj.func);
+        localStorage.setItem('rhset', obj.rhset);
+        localStorage.setItem('iaql', obj.iaql);
+        localStorage.setItem('pm25', obj.pm25);
+        localStorage.setItem('rh', obj.rh);
+        localStorage.setItem('temp', obj.temp);
+        localStorage.setItem('rddp', obj.rddp);
+        localStorage.setItem('wl', obj.wl);
+        localStorage.setItem('fltt1', obj.fltt1);
+        localStorage.setItem('fltt2', obj.fltt2);
+        localStorage.setItem('fltsts0', obj.fltsts0);
+        localStorage.setItem('fltsts1', obj.fltsts1);
+        localStorage.setItem('fltsts2', obj.fltsts2);
+        localStorage.setItem('wicksts', obj.wicksts);
 
-          const purifierService = purifier.accessory.getService(hap.Service.AirPurifier);
-          if (purifierService) {
-            const state = parseInt(obj.pwr) * 2;
-
-            purifierService
-              .updateCharacteristic(hap.Characteristic.Active, obj.pwr)
-              .updateCharacteristic(hap.Characteristic.CurrentAirPurifierState, state)
-              .updateCharacteristic(hap.Characteristic.LockPhysicalControls, obj.cl);
-          }
-          const qualityService = purifier.accessory.getService(hap.Service.AirQualitySensor);
-          if (qualityService) {
-            const iaql = Math.ceil(obj.iaql / 3);
-            qualityService
-              .updateCharacteristic(hap.Characteristic.AirQuality, iaql)
-              .updateCharacteristic(hap.Characteristic.PM2_5Density, obj.pm25);
-          }
-          if (purifier.config.temperature_sensor) {
-            const temperature_sensor = purifier.accessory.getService('Temperature');
-            if (temperature_sensor) {
-              temperature_sensor.updateCharacteristic(hap.Characteristic.CurrentTemperature, obj.temp);
-            }
-          }
-          if (purifier.config.humidity_sensor) {
-            const humidity_sensor = purifier.accessory.getService('Humidity');
-            if (humidity_sensor) {
-              humidity_sensor.updateCharacteristic(hap.Characteristic.CurrentRelativeHumidity, obj.rh);
-            }
-          }
-          if (purifier.config.light_control) {
-            const lightsService = purifier.accessory.getService('Lights');
-            if (obj.pwr == '1') {
-              if (lightsService) {
-                lightsService
-                  .updateCharacteristic(hap.Characteristic.On, obj.aqil > 0)
-                  .updateCharacteristic(hap.Characteristic.Brightness, obj.aqil);
-              }
-            }
-          }
-          if (purifier.config.humidifier) {
-            let water_level = 100;
-            let speed_humidity = 0;
-            if (obj.func == 'PH' && obj.wl == 0) {
-              water_level = 0;
-            }
-            if (obj.pwr == '1') {
-              if (obj.func == 'PH' && water_level == 100) {
-                if (obj.rhset == 40) {
-                  speed_humidity = 25;
-                } else if (obj.rhset == 50) {
-                  speed_humidity = 50;
-                } else if (obj.rhset == 60) {
-                  speed_humidity = 75;
-                } else if (obj.rhset == 70) {
-                  speed_humidity = 100;
-                }
-              }
-            }
-            const Humidifier = purifier.accessory.getService('Humidifier');
-            if (Humidifier) {
-              Humidifier
-                .updateCharacteristic(hap.Characteristic.CurrentRelativeHumidity, obj.rh)
-                .updateCharacteristic(hap.Characteristic.WaterLevel, water_level)
-                .updateCharacteristic(hap.Characteristic.TargetHumidifierDehumidifierState, 1)
-                .updateCharacteristic(hap.Characteristic.RelativeHumidityHumidifierThreshold, speed_humidity);
-              if (water_level == 0) {
-                if (obj.func != 'P') {
-                  exec('airctrl --ipaddr ' + purifier.config.ip + ' --protocol ' + purifier.config.protocol + ' --func P', (error, stdout, stderr) => {
-                    if (error || stderr) {
-                      console.log(timestamp('[DD.MM.YYYY, HH:mm:ss] ') + '\x1b[36m[Philips Air] \x1b[31m[' + purifier.config.name + '] Unable to get data for polling: Error: spawnSync python3 ETIMEDOUT.\x1b[0m');
-                      console.log(timestamp('[DD.MM.YYYY, HH:mm:ss] ') + '\x1b[33mIf your have "Error: spawnSync python3 ETIMEDOUT" your need unplug the accessory from outlet for 10 seconds and plug again.\x1b[0m');
-                    }
-                  });
-                }
-                Humidifier
-                  .updateCharacteristic(hap.Characteristic.Active, 0)
-                  .updateCharacteristic(hap.Characteristic.CurrentHumidifierDehumidifierState, 0)
-                  .updateCharacteristic(hap.Characteristic.RelativeHumidityHumidifierThreshold, 0);
-              }
-            }
-          }
-          if (purifier.config.logger) {
-            if (purifier.config.temperature_sensor) {
-              if (!error || !stderr || !error && !stderr) {
-                const logger_temp = fs.createWriteStream(pathToSensorFiles + 'temp.txt', {
-                  flags: 'w'
-                });
-
-                logger_temp.write(obj.temp.toString());
-                logger_temp.end();
-              }
-            }
-            if (purifier.config.humidity_sensor) {
-              if (!error || !stderr || !error && !stderr) {
-                const logger_hum = fs.createWriteStream(pathToSensorFiles + 'hum.txt', {
-                  flags: 'w'
-                });
-
-                logger_hum.write(obj.rh.toString());
-                logger_hum.end();
-              }
-            }
-          }
-        });
-      }, polling * 1000);
-    } catch (err) {
-      this.log.error('[' + purifier.config.name + '] Unable to load polling info');
-    }
-  }
-
-  async updateFirmware(purifier: Purifier): Promise<void> {
-    try {
-      purifier.lastfirmware = Date.now();
-      const firmware: PurifierFirmware = await purifier.client?.getFirmware();
-      await this.storeKey(purifier);
-      const accInfo = purifier.accessory.getService(hap.Service.AccessoryInformation);
-      if (accInfo) {
-        const name = firmware.modelid;
-
-        accInfo
-          .updateCharacteristic(hap.Characteristic.Manufacturer, 'Philips')
-          .updateCharacteristic(hap.Characteristic.SerialNumber, purifier.config.ip)
-          .updateCharacteristic(hap.Characteristic.Model, name)
-          .updateCharacteristic(hap.Characteristic.FirmwareRevision, firmware.version);
-      }
-    } catch (err) {
-      this.log.error('[' + purifier.config.name + '] Unable to load firmware info: ' + err);
-    }
-  }
-
-  async updateFilters(purifier: Purifier): Promise<void> {
-    try {
-      const filters: PurifierFilters = await purifier.client?.getFilters();
-      purifier.lastfilters = Date.now();
-      await this.storeKey(purifier);
-      const preFilter = purifier.accessory.getService('Pre-filter');
-      if (preFilter) {
-        const fltsts0change = filters.fltsts0 == 0;
-        const fltsts0life = filters.fltsts0 / 360 * 100;
-
-        preFilter
-          .updateCharacteristic(hap.Characteristic.FilterChangeIndication, fltsts0change)
-          .updateCharacteristic(hap.Characteristic.FilterLifeLevel, fltsts0life);
-      }
-
-      const carbonFilter = purifier.accessory.getService('Active carbon filter');
-      if (carbonFilter) {
-        const fltsts2change = filters.fltsts2 == 0;
-        const fltsts2life = filters.fltsts2 / 4800 * 100;
-
-        carbonFilter
-          .updateCharacteristic(hap.Characteristic.FilterChangeIndication, fltsts2change)
-          .updateCharacteristic(hap.Characteristic.FilterLifeLevel, fltsts2life);
-      }
-
-      const hepaFilter = purifier.accessory.getService('HEPA filter');
-      if (hepaFilter) {
-        const fltsts1change = filters.fltsts1 == 0;
-        const fltsts1life = filters.fltsts1 / 4800 * 100;
-
-        hepaFilter
-          .updateCharacteristic(hap.Characteristic.FilterChangeIndication, fltsts1change)
-          .updateCharacteristic(hap.Characteristic.FilterLifeLevel, fltsts1life);
-      }
-      if (purifier.config.humidifier) {
-        const wickFilter = purifier.accessory.getService('Wick filter');
-        if (wickFilter) {
-          const fltwickchange = filters.wicksts == 0;
-          const fltwicklife = Math.round(filters.wicksts / 4800 * 100);
-          wickFilter
-            .updateCharacteristic(hap.Characteristic.FilterChangeIndication, fltwickchange)
-            .updateCharacteristic(hap.Characteristic.FilterLifeLevel, fltwicklife);
+        const accInfo = purifier.accessory.getService(hap.Service.AccessoryInformation);
+        if (accInfo) {
+          const name = obj.modelid;
+  
+          accInfo
+            .updateCharacteristic(hap.Characteristic.Manufacturer, 'Philips')
+            .updateCharacteristic(hap.Characteristic.SerialNumber, purifier.config.ip)
+            .updateCharacteristic(hap.Characteristic.Model, name)
+            .updateCharacteristic(hap.Characteristic.FirmwareRevision, obj.swversion);
         }
-      }
-    } catch (err) {
-      this.log.error('[' + purifier.config.name + '] Unable to load filter info: ' + err);
-    }
-  }
 
-  async updateStatus(purifier: Purifier): Promise<void> {
-    try {
-      const status: PurifierStatus = await purifier.client?.getStatus();
-      purifier.laststatus = Date.now();
-      await this.storeKey(purifier);
-      const purifierService = purifier.accessory.getService(hap.Service.AirPurifier);
-      if (purifierService) {
-        const state = parseInt(status.pwr) * 2;
-
-        purifierService
-          .updateCharacteristic(hap.Characteristic.Active, status.pwr)
-          .updateCharacteristic(hap.Characteristic.CurrentAirPurifierState, state)
-          .updateCharacteristic(hap.Characteristic.LockPhysicalControls, status.cl);
-      }
-      const qualityService = purifier.accessory.getService(hap.Service.AirQualitySensor);
-      if (qualityService) {
-        const iaql = Math.ceil(status.iaql / 3);
-        qualityService
-          .updateCharacteristic(hap.Characteristic.AirQuality, iaql)
-          .updateCharacteristic(hap.Characteristic.PM2_5Density, status.pm25);
-      }
-      if (purifier.config.temperature_sensor) {
-        const temperature_sensor = purifier.accessory.getService('Temperature');
-        if (temperature_sensor) {
-          temperature_sensor.updateCharacteristic(hap.Characteristic.CurrentTemperature, status.temp);
+        const preFilter = purifier.accessory.getService('Pre-filter');
+        if (preFilter) {
+          const fltsts0change = obj.fltsts0 == 0;
+          const fltsts0life = obj.fltsts0 / 360 * 100;
+  
+          preFilter
+            .updateCharacteristic(hap.Characteristic.FilterChangeIndication, fltsts0change)
+            .updateCharacteristic(hap.Characteristic.FilterLifeLevel, fltsts0life);
         }
-      }
-      if (purifier.config.humidity_sensor) {
-        const humidity_sensor = purifier.accessory.getService('Humidity');
-        if (humidity_sensor) {
-          humidity_sensor.updateCharacteristic(hap.Characteristic.CurrentRelativeHumidity, status.rh);
+  
+        const carbonFilter = purifier.accessory.getService('Active carbon filter');
+        if (carbonFilter) {
+          const fltsts2change = obj.fltsts2 == 0;
+          const fltsts2life = obj.fltsts2 / 2400 * 100;
+  
+          carbonFilter
+            .updateCharacteristic(hap.Characteristic.FilterChangeIndication, fltsts2change)
+            .updateCharacteristic(hap.Characteristic.FilterLifeLevel, fltsts2life);
         }
-      }
+  
+        const hepaFilter = purifier.accessory.getService('HEPA filter');
+        if (hepaFilter) {
+          const fltsts1change = obj.fltsts1 == 0;
+          const fltsts1life = obj.fltsts1 / 4800 * 100;
+  
+          hepaFilter
+            .updateCharacteristic(hap.Characteristic.FilterChangeIndication, fltsts1change)
+            .updateCharacteristic(hap.Characteristic.FilterLifeLevel, fltsts1life);
+        }
 
-      if (purifier.config.light_control) {
-        const lightsService = purifier.accessory.getService('Lights');
-        if (status.pwr == '1') {
-          if (lightsService) {
-            lightsService
-              .updateCharacteristic(hap.Characteristic.On, status.aqil > 0)
-              .updateCharacteristic(hap.Characteristic.Brightness, status.aqil);
+        const purifierService = purifier.accessory.getService(hap.Service.AirPurifier);
+        if (purifierService) {
+          const state = parseInt(obj.pwr) * 2;
+          purifier.pwr = parseInt(obj.pwr);
+          purifierService
+            .updateCharacteristic(hap.Characteristic.Active, obj.pwr)
+            .updateCharacteristic(hap.Characteristic.CurrentAirPurifierState, state)
+            .updateCharacteristic(hap.Characteristic.LockPhysicalControls, obj.cl);
+        }
+        const qualityService = purifier.accessory.getService(hap.Service.AirQualitySensor);
+        if (qualityService) {
+          const iaql = Math.ceil(obj.iaql / 3);
+          qualityService
+            .updateCharacteristic(hap.Characteristic.AirQuality, iaql)
+            .updateCharacteristic(hap.Characteristic.PM2_5Density, obj.pm25);
+        }
+        if (purifier.config.temperature_sensor) {
+          const temperature_sensor = purifier.accessory.getService('Temperature');
+          if (temperature_sensor) {
+            temperature_sensor.updateCharacteristic(hap.Characteristic.CurrentTemperature, obj.temp);
           }
         }
-      }
-      if (purifier.config.humidifier) {
-        const Humidifier = purifier.accessory.getService('Humidifier');
-        if (Humidifier) {
-          let speed_humidity = 0;
-          let state_ph = 0;
+        if (purifier.config.humidity_sensor) {
+          const humidity_sensor = purifier.accessory.getService('Humidity');
+          if (humidity_sensor) {
+            humidity_sensor.updateCharacteristic(hap.Characteristic.CurrentRelativeHumidity, obj.rh);
+          }
+        }
+        if (purifier.config.light_control) {
+          const lightsService = purifier.accessory.getService('Lights');
+          if (obj.pwr == '1') {
+            if (lightsService) {
+              lightsService
+                .updateCharacteristic(hap.Characteristic.On, obj.aqil > 0)
+                .updateCharacteristic(hap.Characteristic.Brightness, obj.aqil);
+            }
+          }
+        }
+        if (purifier.config.humidifier) {
           let water_level = 100;
-          if (status.func == 'PH' && status.wl == 0) {
+          let speed_humidity = 0;
+          if (obj.func == 'PH' && obj.wl == 0) {
             water_level = 0;
           }
-          if (status.pwr == '1') {
-            if (status.func == 'PH' && water_level == 100) {
-              state_ph = 1;
-              if (status.rhset == 40) {
+          if (obj.pwr == '1') {
+            if (obj.func == 'PH' && water_level == 100) {
+              if (obj.rhset == 40) {
                 speed_humidity = 25;
-              } else if (status.rhset == 50) {
+              } else if (obj.rhset == 50) {
                 speed_humidity = 50;
-              } else if (status.rhset == 60) {
+              } else if (obj.rhset == 60) {
                 speed_humidity = 75;
-              } else if (status.rhset == 70) {
+              } else if (obj.rhset == 70) {
                 speed_humidity = 100;
               }
             }
           }
-          Humidifier
-            .updateCharacteristic(hap.Characteristic.CurrentRelativeHumidity, status.rh)
-            .updateCharacteristic(hap.Characteristic.WaterLevel, water_level)
-            .updateCharacteristic(hap.Characteristic.TargetHumidifierDehumidifierState, 1);
-          if (state_ph && status.rhset >= 40) {
-            Humidifier
-              .updateCharacteristic(hap.Characteristic.Active, state_ph)
-              .updateCharacteristic(hap.Characteristic.CurrentHumidifierDehumidifierState, state_ph * 2)
-              .updateCharacteristic(hap.Characteristic.RelativeHumidityHumidifierThreshold, speed_humidity);
-          }
-          if (water_level == 0) {
-            if (status.func != 'P') {
-              exec('airctrl --ipaddr ' + purifier.config.ip + ' --protocol ' + purifier.config.protocol + ' --func P', (err, stdout, stderr) => {
-                if (err) {
-                  return;
-                }
-                if (stderr) {
-                  console.error('Unable to switch off purifier ' + stderr + '. If your have "sync timeout" error your need unplug the accessory from the outlet for 10 seconds.');
-                }
-              });
-            }
-          }
-        }
-      }
-    } catch (err) {
-      this.log.error('[' + purifier.config.name + '] Unable to load status info: ' + err);
-    }
-  }
-
-  async setPower(accessory: PlatformAccessory, state: CharacteristicValue): Promise<void> {
-    const purifier = this.purifiers.get(accessory.displayName);
-    if (purifier) {
-      const values = {
-        pwr: (state as boolean).toString()
-      };
-      try {
-        const status: PurifierStatus = await purifier.client?.getStatus();
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        purifier.laststatus = Date.now();
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        await this.storeKey(purifier);
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        let water_level = 100;
-        if (status.func == 'PH' && status.wl == 0) {
-          water_level = 0;
-        }
-        const purifierService = accessory.getService(hap.Service.AirPurifier);
-        if (purifierService) {
-          purifierService.updateCharacteristic(hap.Characteristic.CurrentAirPurifierState, state as number * 2);
-        }
-        if (purifier.config.humidifier) {
-          if (water_level == 0) {
-          // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-          // @ts-ignore
-            values['func'] = 'P';
-          }
-        }
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        await this.enqueuePromise(CommandType.SetData, purifier, values);
-        if (purifier.config.light_control) {
-          const lightsService = accessory.getService('Lights');
-          if (lightsService) {
-            if (state) {
-              lightsService
-                .updateCharacteristic(hap.Characteristic.On, status.aqil > 0)
-                .updateCharacteristic(hap.Characteristic.Brightness, status.aqil);
-            } else {
-              lightsService
-                .updateCharacteristic(hap.Characteristic.On, 0)
-                .updateCharacteristic(hap.Characteristic.Brightness, 0);
-            }
-          }
-        }
-        if (purifier.config.humidifier) {
-          const Humidifier = accessory.getService('Humidifier');
-          let state_ph = 0;
-          if (status.func == 'PH' && water_level == 100) {
-            state_ph = 1;
-          }
+          const Humidifier = purifier.accessory.getService('Humidifier');
           if (Humidifier) {
-            Humidifier.updateCharacteristic(hap.Characteristic.TargetHumidifierDehumidifierState, 1);
-            if (state) {
-              Humidifier
-                .updateCharacteristic(hap.Characteristic.Active, state_ph)
-                .updateCharacteristic(hap.Characteristic.CurrentHumidifierDehumidifierState, state_ph * 2);
-            } else {
+            Humidifier
+              .updateCharacteristic(hap.Characteristic.CurrentRelativeHumidity, obj.rh)
+              .updateCharacteristic(hap.Characteristic.WaterLevel, water_level)
+              .updateCharacteristic(hap.Characteristic.TargetHumidifierDehumidifierState, 1)
+              .updateCharacteristic(hap.Characteristic.RelativeHumidityHumidifierThreshold, speed_humidity);
+            if (water_level == 0) {
+              if (obj.func != 'P') {
+                exec('airctrl --ipaddr ' + purifier.config.ip + ' --protocol ' + purifier.config.protocol + ' --func P', (error, stdout, stderr) => {
+                  if (error || stderr) {
+                    console.log(timestamp('[DD.MM.YYYY, HH:mm:ss] ') + '\x1b[36m[Philips Air] \x1b[31m[' + purifier.config.name + '] Unable to get data for polling: Error: spawnSync python3 ETIMEDOUT.\x1b[0m');
+                    console.log(timestamp('[DD.MM.YYYY, HH:mm:ss] ') + '\x1b[33mIf your have "Error: spawnSync python3 ETIMEDOUT" your need unplug the accessory from outlet for 10 seconds and plug again.\x1b[0m');
+                  }
+                });
+              }
               Humidifier
                 .updateCharacteristic(hap.Characteristic.Active, 0)
                 .updateCharacteristic(hap.Characteristic.CurrentHumidifierDehumidifierState, 0)
@@ -536,6 +299,149 @@ class PhilipsAirPlatform implements DynamicPlatformPlugin {
             }
           }
         }
+      });
+      this.children.push(child);
+  }
+
+  async updateFirmware(purifier: Purifier): Promise<void> {
+
+  }
+
+  async updateFilters(purifier: Purifier): Promise<void> {
+    // try {
+    //   const filters: PurifierFilters = await purifier.client?.getFilters();
+    //   purifier.lastfilters = Date.now();
+    //   await this.storeKey(purifier);
+
+    //   if (purifier.config.humidifier) {
+    //     const wickFilter = purifier.accessory.getService('Wick filter');
+    //     if (wickFilter) {
+    //       const fltwickchange = filters.wicksts == 0;
+    //       const fltwicklife = Math.round(filters.wicksts / 4800 * 100);
+    //       wickFilter
+    //         .updateCharacteristic(hap.Characteristic.FilterChangeIndication, fltwickchange)
+    //         .updateCharacteristic(hap.Characteristic.FilterLifeLevel, fltwicklife);
+    //     }
+    //   }
+    // } catch (err) {
+    //   this.log.error('[' + purifier.config.name + '] Unable to load filter info: ' + err);
+    // }
+  }
+
+  async updateStatus(purifier: Purifier): Promise<void> {
+    // try {
+    //   const status: PurifierStatus = await purifier.client?.getStatus();
+    //   purifier.laststatus = Date.now();
+    //   await this.storeKey(purifier);
+    //   const purifierService = purifier.accessory.getService(hap.Service.AirPurifier);
+    //   if (purifierService) {
+    //     const state = parseInt(status.pwr) * 2;
+
+    //     purifierService
+    //       .updateCharacteristic(hap.Characteristic.Active, status.pwr)
+    //       .updateCharacteristic(hap.Characteristic.CurrentAirPurifierState, state)
+    //       .updateCharacteristic(hap.Characteristic.LockPhysicalControls, status.cl);
+    //   }
+    //   const qualityService = purifier.accessory.getService(hap.Service.AirQualitySensor);
+    //   if (qualityService) {
+    //     const iaql = Math.ceil(status.iaql / 3);
+    //     qualityService
+    //       .updateCharacteristic(hap.Characteristic.AirQuality, iaql)
+    //       .updateCharacteristic(hap.Characteristic.PM2_5Density, status.pm25);
+    //   }
+    //   if (purifier.config.temperature_sensor) {
+    //     const temperature_sensor = purifier.accessory.getService('Temperature');
+    //     if (temperature_sensor) {
+    //       temperature_sensor.updateCharacteristic(hap.Characteristic.CurrentTemperature, status.temp);
+    //     }
+    //   }
+    //   if (purifier.config.humidity_sensor) {
+    //     const humidity_sensor = purifier.accessory.getService('Humidity');
+    //     if (humidity_sensor) {
+    //       humidity_sensor.updateCharacteristic(hap.Characteristic.CurrentRelativeHumidity, status.rh);
+    //     }
+    //   }
+
+    //   if (purifier.config.light_control) {
+    //     const lightsService = purifier.accessory.getService('Lights');
+    //     if (status.pwr == '1') {
+    //       if (lightsService) {
+    //         lightsService
+    //           .updateCharacteristic(hap.Characteristic.On, status.aqil > 0)
+    //           .updateCharacteristic(hap.Characteristic.Brightness, status.aqil);
+    //       }
+    //     }
+    //   }
+    //   if (purifier.config.humidifier) {
+    //     const Humidifier = purifier.accessory.getService('Humidifier');
+    //     if (Humidifier) {
+    //       let speed_humidity = 0;
+    //       let state_ph = 0;
+    //       let water_level = 100;
+    //       if (status.func == 'PH' && status.wl == 0) {
+    //         water_level = 0;
+    //       }
+    //       if (status.pwr == '1') {
+    //         if (status.func == 'PH' && water_level == 100) {
+    //           state_ph = 1;
+    //           if (status.rhset == 40) {
+    //             speed_humidity = 25;
+    //           } else if (status.rhset == 50) {
+    //             speed_humidity = 50;
+    //           } else if (status.rhset == 60) {
+    //             speed_humidity = 75;
+    //           } else if (status.rhset == 70) {
+    //             speed_humidity = 100;
+    //           }
+    //         }
+    //       }
+    //       Humidifier
+    //         .updateCharacteristic(hap.Characteristic.CurrentRelativeHumidity, status.rh)
+    //         .updateCharacteristic(hap.Characteristic.WaterLevel, water_level)
+    //         .updateCharacteristic(hap.Characteristic.TargetHumidifierDehumidifierState, 1);
+    //       if (state_ph && status.rhset >= 40) {
+    //         Humidifier
+    //           .updateCharacteristic(hap.Characteristic.Active, state_ph)
+    //           .updateCharacteristic(hap.Characteristic.CurrentHumidifierDehumidifierState, state_ph * 2)
+    //           .updateCharacteristic(hap.Characteristic.RelativeHumidityHumidifierThreshold, speed_humidity);
+    //       }
+    //       if (water_level == 0) {
+    //         if (status.func != 'P') {
+    //           exec('airctrl --ipaddr ' + purifier.config.ip + ' --protocol ' + purifier.config.protocol + ' --func P', (err, stdout, stderr) => {
+    //             if (err) {
+    //               return;
+    //             }
+    //             if (stderr) {
+    //               console.error('Unable to switch off purifier ' + stderr + '. If your have "sync timeout" error your need unplug the accessory from the outlet for 10 seconds.');
+    //             }
+    //           });
+    //         }
+    //       }
+    //     }
+    //   }
+    // } catch (err) {
+    //   this.log.error('[' + purifier.config.name + '] Unable to load status info: ' + err);
+    // }
+  }
+
+  async setPower(accessory: PlatformAccessory, state: CharacteristicValue): Promise<void> {
+    const purifier = this.purifiers.get(accessory.displayName);
+    if (purifier) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        purifier.laststatus = Date.now();
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        const purifierService = accessory.getService(hap.Service.AirPurifier);
+        const stateNumber = purifier.pwr == 0 ? 1 : 0;
+        if (purifierService) {
+          purifierService.updateCharacteristic(hap.Characteristic.CurrentAirPurifierState, stateNumber as number * 2);
+        }
+        var child = exec(`/usr/local/bin/aioairctrl -H ${purifier.config.ip} set pwr=${stateNumber}`);
+        this.log.error("POWER CHILD SPAWNED " + stateNumber);
       } catch (err) {
         this.log.error('[' + purifier.config.name + '] Error setting power: ' + err);
       }
@@ -554,7 +460,8 @@ class PhilipsAirPlatform implements DynamicPlatformPlugin {
       try {
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore
-        await this.enqueuePromise(CommandType.SetData, purifier, values);
+        // await this.enqueuePromise(CommandType.SetData, purifier, values);
+        var child = exec(`/usr/local/bin/aioairctrl -H ${purifier.config.ip} set uil=${values.uil}`);
       } catch (err) {
         this.log.error('[' + purifier.config.name + '] Error setting brightness: ' + err);
       }
@@ -575,8 +482,8 @@ class PhilipsAirPlatform implements DynamicPlatformPlugin {
       try {
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore
-        await this.enqueuePromise(CommandType.SetData, purifier, values);
-
+       // await this.enqueuePromise(CommandType.SetData, purifier, values);
+       var child = exec(`/usr/local/bin/aioairctrl -H ${purifier.config.ip} set mode=${values.mode}`);
         if (state != 0) {
           const purifierService = accessory.getService(hap.Service.AirPurifier);
           if (purifierService) {
@@ -602,7 +509,8 @@ class PhilipsAirPlatform implements DynamicPlatformPlugin {
       try {
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore
-        await this.enqueuePromise(CommandType.SetData, purifier, values);
+      //  await this.enqueuePromise(CommandType.SetData, purifier, values);
+        var child = exec(`/usr/local/bin/aioairctrl -H ${purifier.config.ip} set cl=${values.cl}`);
       } catch (err) {
         this.log.error('[' + purifier.config.name + '] Error setting lock: ' + err);
       }
@@ -757,8 +665,8 @@ class PhilipsAirPlatform implements DynamicPlatformPlugin {
         try {
           // eslint-disable-next-line @typescript-eslint/ban-ts-comment
           // @ts-ignore
-          await this.enqueuePromise(CommandType.SetData, purifier, values);
-
+        //  await this.enqueuePromise(CommandType.SetData, purifier, values);
+          var child = exec(`/usr/local/bin/aioairctrl -H ${purifier.config.ip} set om=${values.om}`);
           const service = accessory.getService(hap.Service.AirPurifier);
           if (service) {
             service.updateCharacteristic(hap.Characteristic.TargetAirPurifierState, 0);
@@ -1067,9 +975,6 @@ class PhilipsAirPlatform implements DynamicPlatformPlugin {
 
     let command;
     switch (todoItem.type) {
-      case CommandType.Polling:
-        command = this.updatePolling(todoItem.purifier);
-        break;
       case CommandType.GetFirmware:
         command = this.updateFirmware(todoItem.purifier);
         break;
